@@ -14,6 +14,7 @@ const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
 
 let accessToken = null;
 let tokenExpiry = null;
+let currentRefreshToken = process.env.MS_REFRESH_TOKEN;
 
 async function getAccessToken() {
   if (accessToken && tokenExpiry && Date.now() < tokenExpiry) {
@@ -23,8 +24,9 @@ async function getAccessToken() {
   const body = new URLSearchParams({
     client_id: AZURE_CLIENT_ID,
     client_secret: AZURE_CLIENT_SECRET,
-    scope: "https://graph.microsoft.com/.default",
-    grant_type: "client_credentials",
+    grant_type: "refresh_token",
+    refresh_token: currentRefreshToken,
+    scope: "Mail.ReadWrite Calendars.ReadWrite Tasks.ReadWrite offline_access",
   });
   const res = await fetch(url, {
     method: "POST",
@@ -33,10 +35,13 @@ async function getAccessToken() {
   });
   const data = await res.json();
   if (!data.access_token) {
-    throw new Error(`Token error: ${JSON.stringify(data)}`);
+    throw new Error(`Token refresh error: ${JSON.stringify(data)}`);
   }
   accessToken = data.access_token;
   tokenExpiry = Date.now() + (data.expires_in - 60) * 1000;
+  if (data.refresh_token) {
+    currentRefreshToken = data.refresh_token;
+  }
   return accessToken;
 }
 
@@ -66,26 +71,32 @@ async function createDraft(subject, body, toName) {
       ? [{ emailAddress: { name: toName, address: "" } }]
       : [],
   };
-  await graphRequest("POST", `/users/${USER_EMAIL}/messages`, message);
+  await graphRequest("POST", "/me/messages", message);
 }
 
 async function createCalendarEvent(title, details) {
   const event = {
     subject: title,
     body: { contentType: "Text", content: details },
-    start: { dateTime: new Date(Date.now() + 86400000).toISOString(), timeZone: "Europe/Amsterdam" },
-    end: { dateTime: new Date(Date.now() + 90000000).toISOString(), timeZone: "Europe/Amsterdam" },
+    start: {
+      dateTime: new Date(Date.now() + 86400000).toISOString(),
+      timeZone: "Europe/Amsterdam",
+    },
+    end: {
+      dateTime: new Date(Date.now() + 90000000).toISOString(),
+      timeZone: "Europe/Amsterdam",
+    },
     isOnlineMeeting: false,
     attendees: [],
   };
-  await graphRequest("POST", `/users/${USER_EMAIL}/events`, event);
+  await graphRequest("POST", "/me/events", event);
 }
 
 async function getOrCreateToDoList() {
-  const lists = await graphRequest("GET", `/users/${USER_EMAIL}/todo/lists`);
+  const lists = await graphRequest("GET", "/me/todo/lists");
   const existing = lists.value.find((l) => l.displayName === "Voice Assistant");
   if (existing) return existing.id;
-  const newList = await graphRequest("POST", `/users/${USER_EMAIL}/todo/lists`, {
+  const newList = await graphRequest("POST", "/me/todo/lists", {
     displayName: "Voice Assistant",
   });
   return newList.id;
@@ -93,7 +104,7 @@ async function getOrCreateToDoList() {
 
 async function createTask(title, notes) {
   const listId = await getOrCreateToDoList();
-  await graphRequest("POST", `/users/${USER_EMAIL}/todo/lists/${listId}/tasks`, {
+  await graphRequest("POST", `/me/todo/lists/${listId}/tasks`, {
     title,
     body: { contentType: "text", content: notes || "" },
   });
@@ -184,7 +195,10 @@ async function handleUpdate(update) {
   }
 
   if (text === "/start") {
-    await sendTelegramMessage(chatId, "Stuur je transcript en ik verwerk het direct in Outlook.");
+    await sendTelegramMessage(
+      chatId,
+      "Stuur je transcript en ik verwerk het direct in Outlook."
+    );
     return;
   }
 
@@ -217,7 +231,9 @@ async function handleUpdate(update) {
 const server = http.createServer(async (req, res) => {
   if (req.method === "POST") {
     let body = "";
-    req.on("data", (chunk) => { body += chunk; });
+    req.on("data", (chunk) => {
+      body += chunk;
+    });
     req.on("end", async () => {
       try {
         const update = JSON.parse(body);
