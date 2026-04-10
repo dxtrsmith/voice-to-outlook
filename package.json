@@ -1,0 +1,11 @@
+{
+  "name": "voice-to-outlook",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "start": "bun run index.js"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.39.0"
+  }
+}
