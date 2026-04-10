@@ -3,6 +3,7 @@ import http from "http";
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
+const ALLOWED_USER_ID = parseInt(process.env.ALLOWED_USER_ID);
 const PORT = process.env.PORT || 3000;
 
 const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
@@ -86,7 +87,13 @@ async function handleUpdate(update) {
   if (!message || !message.text) return;
 
   const chatId = message.chat.id;
+  const userId = message.from.id;
   const text = message.text.trim();
+
+  if (userId !== ALLOWED_USER_ID) {
+    console.log(`Blocked unauthorized user: ${userId}`);
+    return;
+  }
 
   if (text === "/start") {
     await sendTelegramMessage(
