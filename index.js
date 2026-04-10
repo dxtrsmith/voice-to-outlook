@@ -1,4 +1,5 @@
 import Anthropic from "@anthropic-ai/sdk";
+import http from "http";
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
@@ -65,7 +66,7 @@ async function sendTelegramMessage(chatId, text) {
   const res = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ chat_id: chatId, text, parse_mode: "Markdown" }),
+    body: JSON.stringify({ chat_id: chatId, text }),
   });
   return res.json();
 }
@@ -90,12 +91,12 @@ async function handleUpdate(update) {
   if (text === "/start") {
     await sendTelegramMessage(
       chatId,
-      "👋 Stuur je transcript en ik maak er een email, meeting of taak van."
+      "Stuur je transcript en ik maak er een email, meeting of taak van."
     );
     return;
   }
 
-  await sendTelegramMessage(chatId, "⏳ Even verwerken...");
+  await sendTelegramMessage(chatId, "Even verwerken...");
 
   try {
     const result = await processWithClaude(text);
@@ -104,26 +105,31 @@ async function handleUpdate(update) {
     console.error("Error:", err);
     await sendTelegramMessage(
       chatId,
-      "❌ Er ging iets mis. Probeer het opnieuw."
+      "Er ging iets mis. Probeer het opnieuw."
     );
   }
 }
 
-// Simple HTTP server to receive Telegram webhook
-const server = Bun.serve({
-  port: PORT,
-  async fetch(req) {
-    if (req.method === "POST") {
+const server = http.createServer(async (req, res) => {
+  if (req.method === "POST") {
+    let body = "";
+    req.on("data", (chunk) => { body += chunk; });
+    req.on("end", async () => {
       try {
-        const update = await req.json();
+        const update = JSON.parse(body);
         await handleUpdate(update);
       } catch (err) {
         console.error("Webhook error:", err);
       }
-      return new Response("OK");
-    }
-    return new Response("Voice-to-Outlook bot is running.");
-  },
+      res.writeHead(200);
+      res.end("OK");
+    });
+  } else {
+    res.writeHead(200);
+    res.end("Voice-to-Outlook bot is running.");
+  }
 });
 
-console.log(`Bot running on port ${PORT}`);
+server.listen(PORT, () => {
+  console.log(`Bot running on port ${PORT}`);
+});
