@@ -16,6 +16,9 @@ let accessToken = null;
 let tokenExpiry = null;
 let currentRefreshToken = process.env.MS_REFRESH_TOKEN;
 
+// Pending disambiguation state
+const pendingLookups = {};
+
 async function getAccessToken() {
   if (accessToken && tokenExpiry && Date.now() < tokenExpiry) {
     return accessToken;
@@ -26,7 +29,7 @@ async function getAccessToken() {
     client_secret: AZURE_CLIENT_SECRET,
     grant_type: "refresh_token",
     refresh_token: currentRefreshToken,
-    scope: "Mail.ReadWrite Calendars.ReadWrite Tasks.ReadWrite offline_access",
+    scope: "Mail.ReadWrite Calendars.ReadWrite Tasks.ReadWrite People.Read offline_access",
   });
   const res = await fetch(url, {
     method: "POST",
@@ -63,13 +66,27 @@ async function graphRequest(method, path, body) {
   return res.json();
 }
 
-async function createDraft(subject, body, toName) {
+async function lookupRecipient(name) {
+  if (!name) return null;
+  const encoded = encodeURIComponent(name);
+  const data = await graphRequest("GET", `/me/people?$search=${encoded}&$top=5`);
+  const people = (data.value || []).filter(
+    (p) => p.scoredEmailAddresses && p.scoredEmailAddresses.length > 0
+  );
+  return people;
+}
+
+async function createDraft(subject, body, toName, toEmail) {
+  const toRecipients = toEmail
+    ? [{ emailAddress: { name: toName || toEmail, address: toEmail } }]
+    : toName
+    ? [{ emailAddress: { name: toName, address: "" } }]
+    : [];
+
   const message = {
     subject,
     body: { contentType: "Text", content: body },
-    toRecipients: toName
-      ? [{ emailAddress: { name: toName, address: "" } }]
-      : [],
+    toRecipients,
   };
   await graphRequest("POST", "/me/messages", message);
 }
@@ -194,11 +211,29 @@ async function handleUpdate(update) {
     return;
   }
 
+  // Handle disambiguation reply
+  if (pendingLookups[chatId]) {
+    const pending = pendingLookups[chatId];
+    const choice = parseInt(text);
+    if (!isNaN(choice) && choice >= 1 && choice <= pending.candidates.length) {
+      const chosen = pending.candidates[choice - 1];
+      const email = chosen.scoredEmailAddresses[0].address;
+      delete pendingLookups[chatId];
+      await sendTelegramMessage(chatId, "Even verwerken...");
+      try {
+        await createDraft(pending.subject, pending.body, chosen.displayName, email);
+        await sendTelegramMessage(chatId, `Email opgeslagen in Drafts\nAan: ${chosen.displayName} (${email})\nOnderwerp: ${pending.subject}`);
+      } catch (err) {
+        await sendTelegramMessage(chatId, `Er ging iets mis: ${err.message}`);
+      }
+    } else {
+      await sendTelegramMessage(chatId, `Stuur een getal tussen 1 en ${pending.candidates.length}.`);
+    }
+    return;
+  }
+
   if (text === "/start") {
-    await sendTelegramMessage(
-      chatId,
-      "Stuur je transcript en ik verwerk het direct in Outlook."
-    );
+    await sendTelegramMessage(chatId, "Stuur je transcript en ik verwerk het direct in Outlook.");
     return;
   }
 
@@ -210,18 +245,48 @@ async function handleUpdate(update) {
 
     for (const output of parsed.outputs) {
       if (output.type === "email") {
-        await createDraft(output.subject, output.body, output.to_name);
-        results.push(`Email opgeslagen in Drafts\nOnderwerp: ${output.subject}`);
+        // Try recipient lookup
+        let toEmail = null;
+        let toDisplayName = output.to_name;
+
+        if (output.to_name) {
+          const candidates = await lookupRecipient(output.to_name);
+          if (candidates && candidates.length === 1) {
+            toEmail = candidates[0].scoredEmailAddresses[0].address;
+            toDisplayName = candidates[0].displayName;
+          } else if (candidates && candidates.length > 1) {
+            // Ask Dexter to disambiguate
+            pendingLookups[chatId] = {
+              candidates,
+              subject: output.subject,
+              body: output.body,
+            };
+            const options = candidates
+              .map((p, i) => `${i + 1}. ${p.displayName} (${p.scoredEmailAddresses[0].address})`)
+              .join("\n");
+            await sendTelegramMessage(chatId, `Welke ${output.to_name} bedoel je?\n\n${options}`);
+            continue;
+          }
+        }
+
+        await createDraft(output.subject, output.body, toDisplayName, toEmail);
+        const toLine = toEmail ? `Aan: ${toDisplayName} (${toEmail})` : `Aan: ${toDisplayName || "onbekend"} — vul e-mailadres in`;
+        results.push(`Email opgeslagen in Drafts\n${toLine}\nOnderwerp: ${output.subject}`);
+
       } else if (output.type === "meeting") {
         await createCalendarEvent(output.title, output.details);
         results.push(`Meeting toegevoegd aan je agenda\nTitel: ${output.title}`);
+
       } else if (output.type === "task") {
         await createTask(output.title, output.notes);
         results.push(`Taak aangemaakt in To Do\nTaak: ${output.title}`);
       }
     }
 
-    await sendTelegramMessage(chatId, results.join("\n\n---\n\n"));
+    if (results.length > 0) {
+      await sendTelegramMessage(chatId, results.join("\n\n---\n\n"));
+    }
+
   } catch (err) {
     console.error("Error:", err);
     await sendTelegramMessage(chatId, `Er ging iets mis: ${err.message}`);
@@ -231,9 +296,7 @@ async function handleUpdate(update) {
 const server = http.createServer(async (req, res) => {
   if (req.method === "POST") {
     let body = "";
-    req.on("data", (chunk) => {
-      body += chunk;
-    });
+    req.on("data", (chunk) => { body += chunk; });
     req.on("end", async () => {
       try {
         const update = JSON.parse(body);
