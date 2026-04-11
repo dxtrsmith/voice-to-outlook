@@ -19,8 +19,7 @@ const pendingLookups = {};
 function buildDateContext() {
   const days = ["zondag", "maandag", "dinsdag", "woensdag", "donderdag", "vrijdag", "zaterdag"];
   const now = new Date();
-  const today = now.toISOString().slice(0, 10);
-  const lines = ["Today is " + today + " (" + days[now.getDay()] + ")."];
+  const lines = ["Today is " + now.toISOString().slice(0, 10) + " (" + days[now.getDay()] + ")."];
   lines.push("Use these exact dates for relative references:");
   for (let i = 0; i <= 14; i++) {
     const d = new Date(now);
@@ -80,21 +79,33 @@ async function graphRequest(method, path, body) {
 
 async function lookupRecipient(name) {
   if (!name) return null;
-  const encoded = encodeURIComponent(name);
 
+  const encoded = encodeURIComponent(name);
   const data = await graphRequest("GET", "/me/people?$search=" + encoded + "&$top=10");
+
+  // Only real people with email addresses
   const people = (data.value || []).filter(function(p) {
-    const hasEmail = p.scoredEmailAddresses && p.scoredEmailAddresses.length > 0;
-    const isPerson = p.personType && p.personType.class === "Person";
-    return hasEmail && isPerson;
+    return p.scoredEmailAddresses &&
+      p.scoredEmailAddresses.length > 0 &&
+      p.personType &&
+      p.personType.class === "Person";
   });
 
-  // First try: strong relevance only
-  const strong = people.filter(function(p) { return p.relevanceScore && p.relevanceScore > 1; });
-  if (strong.length > 0) return strong;
+  // Filter by name words: keep only candidates whose display name contains
+  // the first AND last word of the spoken name (case insensitive)
+  const words = name.trim().toLowerCase().split(/\s+/);
+  const firstName = words[0];
+  const lastName = words[words.length - 1];
 
-  // Fallback: return any person match (top 3)
-  return people.slice(0, 3);
+  const matched = people.filter(function(p) {
+    const dn = (p.displayName || "").toLowerCase();
+    if (words.length === 1) {
+      return dn.includes(firstName);
+    }
+    return dn.includes(firstName) && dn.includes(lastName);
+  });
+
+  return matched;
 }
 
 async function createDraft(subject, body, toName, toEmail) {
