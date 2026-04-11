@@ -16,11 +16,26 @@ let tokenExpiry = null;
 let currentRefreshToken = process.env.MS_REFRESH_TOKEN;
 const pendingLookups = {};
 
+function buildDateContext() {
+  const days = ["zondag", "maandag", "dinsdag", "woensdag", "donderdag", "vrijdag", "zaterdag"];
+  const now = new Date();
+  const today = now.toISOString().slice(0, 10);
+  const lines = ["Today is " + today + " (" + days[now.getDay()] + ")."];
+  lines.push("Use these exact dates for relative references:");
+  for (let i = 0; i <= 14; i++) {
+    const d = new Date(now);
+    d.setDate(now.getDate() + i);
+    const label = i === 0 ? "vandaag" : i === 1 ? "morgen" : days[d.getDay()] + (i > 7 ? " (volgende week)" : "");
+    lines.push("- " + label + " = " + d.toISOString().slice(0, 10));
+  }
+  return lines.join("\n");
+}
+
 async function getAccessToken() {
   if (accessToken && tokenExpiry && Date.now() < tokenExpiry) {
     return accessToken;
   }
-  const url = `https://login.microsoftonline.com/${AZURE_TENANT_ID}/oauth2/v2.0/token`;
+  const url = "https://login.microsoftonline.com/" + AZURE_TENANT_ID + "/oauth2/v2.0/token";
   const body = new URLSearchParams({
     client_id: AZURE_CLIENT_ID,
     client_secret: AZURE_CLIENT_SECRET,
@@ -48,7 +63,7 @@ async function getAccessToken() {
 async function graphRequest(method, path, body) {
   const token = await getAccessToken();
   const res = await fetch("https://graph.microsoft.com/v1.0" + path, {
-    method,
+    method: method,
     headers: {
       Authorization: "Bearer " + token,
       "Content-Type": "application/json",
@@ -66,14 +81,20 @@ async function graphRequest(method, path, body) {
 async function lookupRecipient(name) {
   if (!name) return null;
   const encoded = encodeURIComponent(name);
+
   const data = await graphRequest("GET", "/me/people?$search=" + encoded + "&$top=10");
   const people = (data.value || []).filter(function(p) {
     const hasEmail = p.scoredEmailAddresses && p.scoredEmailAddresses.length > 0;
     const isPerson = p.personType && p.personType.class === "Person";
-    const hasRelevance = p.relevanceScore && p.relevanceScore > 5;
-    return hasEmail && isPerson && hasRelevance;
+    return hasEmail && isPerson;
   });
-  return people;
+
+  // First try: strong relevance only
+  const strong = people.filter(function(p) { return p.relevanceScore && p.relevanceScore > 1; });
+  if (strong.length > 0) return strong;
+
+  // Fallback: return any person match (top 3)
+  return people.slice(0, 3);
 }
 
 async function createDraft(subject, body, toName, toEmail) {
@@ -123,8 +144,8 @@ async function createTask(title, notes, dueDate) {
 }
 
 async function processWithClaude(transcript) {
-  const today = new Date().toISOString().slice(0, 10);
-  const system = "You are Dexter's personal voice-to-Outlook assistant. Dexter Smith is a Product Director at IceMobile, working with clients like Kruidvat (AS Watson) and Albert Heijn.\n\nToday's date is " + today + ".\n\nTASK: Analyze the Dutch transcript, detect the intent(s), and produce structured JSON output.\n\nINTENT DETECTION:\n- email: Dexter wants to send an email\n- meeting: Dexter wants to schedule a meeting or calendar event\n- task: Dexter wants to add a to-do item\n\nSTRICT RULES:\n- Never auto-send, never invite attendees. Emails go to Drafts only.\n- Only email who Dexter explicitly mentions. Never assume recipients.\n- Default language is ALWAYS Dutch. Only switch to English if Dexter explicitly says so.\n- No em-dashes. Ever.\n\nDUTCH EMAIL STYLE:\n- Opening: always \"Hi [name],\" or \"Hi,\" - never \"Beste\" or \"Geachte\"\n- Sign-off: \"Groetjes,\\nDexter\"\n- Tone: direct, friendly, no padding. Point in first sentence.\n- Short declarative sentences. Bullet points for multiple items.\n\nENGLISH EMAIL STYLE (only when Dexter explicitly requests):\n- Opening: \"Hi [name]\" or \"Hi all\"\n- Sign-off: \"Regards,\\nDexter\"\n- Confident, clear, action-oriented.\n\nDATE/TIME PARSING:\n- Today is " + today + "\n- Parse relative dates: \"morgen\" = tomorrow, \"vrijdag\" = next Friday, \"volgende week dinsdag\" = next Tuesday\n- For meetings: extract start datetime and calculate end (default 1 hour unless specified)\n- Format datetimes as: YYYY-MM-DDTHH:mm:00 (24h, no timezone suffix)\n- For tasks: extract due date as YYYY-MM-DD\n- If no date/time mentioned, use null\n\nRespond ONLY with valid JSON, no markdown, no backticks:\n{\n  \"outputs\": [\n    {\n      \"type\": \"email\",\n      \"to_name\": \"Full name as spoken, or empty string\",\n      \"subject\": \"Short email subject\",\n      \"body\": \"Full email body text\"\n    },\n    {\n      \"type\": \"meeting\",\n      \"title\": \"Short meeting title\",\n      \"details\": \"Agenda and context as plain text\",\n      \"start_datetime\": \"YYYY-MM-DDTHH:mm:00 or null\",\n      \"end_datetime\": \"YYYY-MM-DDTHH:mm:00 or null\"\n    },\n    {\n      \"type\": \"task\",\n      \"title\": \"Clear action item\",\n      \"notes\": \"Any relevant context or empty string\",\n      \"due_date\": \"YYYY-MM-DD or null\"\n    }\n  ]\n}";
+  const dateContext = buildDateContext();
+  const system = "You are Dexter's personal voice-to-Outlook assistant. Dexter Smith is a Product Director at IceMobile, working with clients like Kruidvat (AS Watson) and Albert Heijn.\n\n" + dateContext + "\n\nTASK: Analyze the Dutch transcript, detect the intent(s), and produce structured JSON output.\n\nINTENT DETECTION:\n- email: Dexter wants to send an email\n- meeting: Dexter wants to schedule a meeting or calendar event\n- task: Dexter wants to add a to-do item\n\nSTRICT RULES:\n- Never auto-send, never invite attendees. Emails go to Drafts only.\n- Only email who Dexter explicitly mentions. Never assume recipients.\n- Default language is ALWAYS Dutch. Only switch to English if Dexter explicitly says so.\n- No em-dashes. Ever.\n\nDUTCH EMAIL STYLE:\n- Opening: always \"Hi [name],\" or \"Hi,\" - never \"Beste\" or \"Geachte\"\n- Sign-off: \"Groetjes,\\nDexter\"\n- Tone: direct, friendly, no padding. Point in first sentence.\n- Short declarative sentences. Bullet points for multiple items.\n\nENGLISH EMAIL STYLE (only when Dexter explicitly requests):\n- Opening: \"Hi [name]\" or \"Hi all\"\n- Sign-off: \"Regards,\\nDexter\"\n- Confident, clear, action-oriented.\n\nDATE/TIME PARSING:\n- Use ONLY the exact dates listed above. Do not calculate dates yourself.\n- For meetings: extract start datetime and calculate end (default 1 hour unless specified)\n- Format datetimes as: YYYY-MM-DDTHH:mm:00 (24h, no timezone suffix)\n- For tasks: extract due date as YYYY-MM-DD\n- If no date/time mentioned, use null\n\nRespond ONLY with valid JSON, no markdown, no backticks:\n{\n  \"outputs\": [\n    {\n      \"type\": \"email\",\n      \"to_name\": \"Full name as spoken, or empty string\",\n      \"subject\": \"Short email subject\",\n      \"body\": \"Full email body text\"\n    },\n    {\n      \"type\": \"meeting\",\n      \"title\": \"Short meeting title\",\n      \"details\": \"Agenda and context as plain text\",\n      \"start_datetime\": \"YYYY-MM-DDTHH:mm:00 or null\",\n      \"end_datetime\": \"YYYY-MM-DDTHH:mm:00 or null\"\n    },\n    {\n      \"type\": \"task\",\n      \"title\": \"Clear action item\",\n      \"notes\": \"Any relevant context or empty string\",\n      \"due_date\": \"YYYY-MM-DD or null\"\n    }\n  ]\n}";
 
   const message = await anthropic.messages.create({
     model: "claude-sonnet-4-20250514",
