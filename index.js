@@ -1,5 +1,5 @@
-import Anthropic from “@anthropic-ai/sdk”;
-import http from “http”;
+import Anthropic from "@anthropic-ai/sdk";
+import http from "http";
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
@@ -14,327 +14,252 @@ const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
 let accessToken = null;
 let tokenExpiry = null;
 let currentRefreshToken = process.env.MS_REFRESH_TOKEN;
-
 const pendingLookups = {};
 
 async function getAccessToken() {
-if (accessToken && tokenExpiry && Date.now() < tokenExpiry) {
-return accessToken;
-}
-const url = `https://login.microsoftonline.com/${AZURE_TENANT_ID}/oauth2/v2.0/token`;
-const body = new URLSearchParams({
-client_id: AZURE_CLIENT_ID,
-client_secret: AZURE_CLIENT_SECRET,
-grant_type: “refresh_token”,
-refresh_token: currentRefreshToken,
-scope: “Mail.ReadWrite Calendars.ReadWrite Tasks.ReadWrite People.Read offline_access”,
-});
-const res = await fetch(url, {
-method: “POST”,
-headers: { “Content-Type”: “application/x-www-form-urlencoded” },
-body: body.toString(),
-});
-const data = await res.json();
-if (!data.access_token) {
-throw new Error(`Token refresh error: ${JSON.stringify(data)}`);
-}
-accessToken = data.access_token;
-tokenExpiry = Date.now() + (data.expires_in - 60) * 1000;
-if (data.refresh_token) {
-currentRefreshToken = data.refresh_token;
-}
-return accessToken;
+  if (accessToken && tokenExpiry && Date.now() < tokenExpiry) {
+    return accessToken;
+  }
+  const url = `https://login.microsoftonline.com/${AZURE_TENANT_ID}/oauth2/v2.0/token`;
+  const body = new URLSearchParams({
+    client_id: AZURE_CLIENT_ID,
+    client_secret: AZURE_CLIENT_SECRET,
+    grant_type: "refresh_token",
+    refresh_token: currentRefreshToken,
+    scope: "Mail.ReadWrite Calendars.ReadWrite Tasks.ReadWrite People.Read offline_access",
+  });
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: body.toString(),
+  });
+  const data = await res.json();
+  if (!data.access_token) {
+    throw new Error("Token refresh error: " + JSON.stringify(data));
+  }
+  accessToken = data.access_token;
+  tokenExpiry = Date.now() + (data.expires_in - 60) * 1000;
+  if (data.refresh_token) {
+    currentRefreshToken = data.refresh_token;
+  }
+  return accessToken;
 }
 
 async function graphRequest(method, path, body) {
-const token = await getAccessToken();
-const res = await fetch(`https://graph.microsoft.com/v1.0${path}`, {
-method,
-headers: {
-Authorization: `Bearer ${token}`,
-“Content-Type”: “application/json”,
-},
-body: body ? JSON.stringify(body) : undefined,
-});
-if (!res.ok) {
-const err = await res.text();
-throw new Error(`Graph API error ${res.status}: ${err}`);
-}
-if (res.status === 204) return null;
-return res.json();
+  const token = await getAccessToken();
+  const res = await fetch("https://graph.microsoft.com/v1.0" + path, {
+    method,
+    headers: {
+      Authorization: "Bearer " + token,
+      "Content-Type": "application/json",
+    },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error("Graph API error " + res.status + ": " + err);
+  }
+  if (res.status === 204) return null;
+  return res.json();
 }
 
 async function lookupRecipient(name) {
-if (!name) return null;
-const encoded = encodeURIComponent(name);
-const data = await graphRequest(“GET”, `/me/people?$search=${encoded}&$top=10`);
-
-// Filter to real people only, with recent interaction score
-const people = (data.value || []).filter((p) => {
-const hasEmail = p.scoredEmailAddresses && p.scoredEmailAddresses.length > 0;
-const isPerson = p.personType && p.personType.class === “Person”;
-const hasRelevance = p.relevanceScore && p.relevanceScore > 5;
-return hasEmail && isPerson && hasRelevance;
-});
-
-return people;
+  if (!name) return null;
+  const encoded = encodeURIComponent(name);
+  const data = await graphRequest("GET", "/me/people?$search=" + encoded + "&$top=10");
+  const people = (data.value || []).filter(function(p) {
+    const hasEmail = p.scoredEmailAddresses && p.scoredEmailAddresses.length > 0;
+    const isPerson = p.personType && p.personType.class === "Person";
+    const hasRelevance = p.relevanceScore && p.relevanceScore > 5;
+    return hasEmail && isPerson && hasRelevance;
+  });
+  return people;
 }
 
 async function createDraft(subject, body, toName, toEmail) {
-const toRecipients = toEmail
-? [{ emailAddress: { name: toName || toEmail, address: toEmail } }]
-: toName
-? [{ emailAddress: { name: toName, address: “” } }]
-: [];
-await graphRequest(“POST”, “/me/messages”, {
-subject,
-body: { contentType: “Text”, content: body },
-toRecipients,
-});
+  const toRecipients = toEmail
+    ? [{ emailAddress: { name: toName || toEmail, address: toEmail } }]
+    : toName
+    ? [{ emailAddress: { name: toName, address: "" } }]
+    : [];
+  await graphRequest("POST", "/me/messages", {
+    subject: subject,
+    body: { contentType: "Text", content: body },
+    toRecipients: toRecipients,
+  });
 }
 
 async function createCalendarEvent(title, details, startDateTime, endDateTime) {
-// Default to tomorrow 10:00-11:00 if no date parsed
-const start = startDateTime || new Date(Date.now() + 86400000).toISOString().slice(0, 16);
-const end = endDateTime || new Date(Date.now() + 90000000).toISOString().slice(0, 16);
-await graphRequest(“POST”, “/me/events”, {
-subject: title,
-body: { contentType: “Text”, content: details },
-start: { dateTime: start, timeZone: “Europe/Amsterdam” },
-end: { dateTime: end, timeZone: “Europe/Amsterdam” },
-isOnlineMeeting: false,
-attendees: [],
-});
+  const start = startDateTime || new Date(Date.now() + 86400000).toISOString().slice(0, 16);
+  const end = endDateTime || new Date(Date.now() + 90000000).toISOString().slice(0, 16);
+  await graphRequest("POST", "/me/events", {
+    subject: title,
+    body: { contentType: "Text", content: details },
+    start: { dateTime: start, timeZone: "Europe/Amsterdam" },
+    end: { dateTime: end, timeZone: "Europe/Amsterdam" },
+    isOnlineMeeting: false,
+    attendees: [],
+  });
 }
 
 async function getOrCreateToDoList() {
-const lists = await graphRequest(“GET”, “/me/todo/lists”);
-const existing = lists.value.find((l) => l.displayName === “Voice Assistant”);
-if (existing) return existing.id;
-const newList = await graphRequest(“POST”, “/me/todo/lists”, { displayName: “Voice Assistant” });
-return newList.id;
+  const lists = await graphRequest("GET", "/me/todo/lists");
+  const existing = lists.value.find(function(l) { return l.displayName === "Voice Assistant"; });
+  if (existing) return existing.id;
+  const newList = await graphRequest("POST", "/me/todo/lists", { displayName: "Voice Assistant" });
+  return newList.id;
 }
 
 async function createTask(title, notes, dueDate) {
-const listId = await getOrCreateToDoList();
-const task = {
-title,
-body: { contentType: “text”, content: notes || “” },
-};
-if (dueDate) {
-task.dueDateTime = { dateTime: dueDate, timeZone: “Europe/Amsterdam” };
+  const listId = await getOrCreateToDoList();
+  const task = {
+    title: title,
+    body: { contentType: "text", content: notes || "" },
+  };
+  if (dueDate) {
+    task.dueDateTime = { dateTime: dueDate + "T00:00:00", timeZone: "Europe/Amsterdam" };
+  }
+  await graphRequest("POST", "/me/todo/lists/" + listId + "/tasks", task);
 }
-await graphRequest(“POST”, `/me/todo/lists/${listId}/tasks`, task);
-}
-
-const STYLE_PROMPT = `You are Dexter’s personal voice-to-Outlook assistant. Dexter Smith is a Product Director at IceMobile, working with clients like Kruidvat (AS Watson) and Albert Heijn.
-
-Today’s date is ${new Date().toISOString().slice(0, 10)}.
-
-TASK: Analyze the Dutch transcript, detect the intent(s), and produce structured JSON output.
-
-INTENT DETECTION:
-
-- email: Dexter wants to send an email
-- meeting: Dexter wants to schedule a meeting or calendar event
-- task: Dexter wants to add a to-do item
-
-STRICT RULES:
-
-- Never auto-send, never invite attendees. Emails go to Drafts only.
-- Only email who Dexter explicitly mentions. Never assume recipients.
-- Default language is ALWAYS Dutch. Only switch to English if Dexter explicitly says so.
-- No em-dashes. Ever.
-
-DUTCH EMAIL STYLE:
-
-- Opening: always “Hi [name],” or “Hi,” — never “Beste” or “Geachte”
-- Sign-off: “Groetjes,\nDexter”
-- Tone: direct, friendly, no padding. Point in first sentence.
-- Short declarative sentences. Bullet points for multiple items.
-
-ENGLISH EMAIL STYLE (only when Dexter explicitly requests):
-
-- Opening: “Hi [name]” or “Hi all”
-- Sign-off: “Regards,\nDexter”
-- Confident, clear, action-oriented.
-
-DATE/TIME PARSING:
-
-- Today is ${new Date().toISOString().slice(0, 10)}
-- Parse relative dates: “morgen” = tomorrow, “vrijdag” = next Friday, “volgende week dinsdag” = next Tuesday etc.
-- For meetings: extract start datetime and calculate end datetime (default 1 hour duration unless specified)
-- Format datetimes as: “YYYY-MM-DDTHH:mm:00” (24h format, no timezone suffix)
-- For tasks: extract due date as “YYYY-MM-DD”
-- If no date/time mentioned, use null
-
-Respond ONLY with valid JSON, no markdown, no backticks:
-{
-“outputs”: [
-{
-“type”: “email”,
-“to_name”: “Full name as spoken, or empty string”,
-“subject”: “Short email subject”,
-“body”: “Full email body text”
-},
-{
-“type”: “meeting”,
-“title”: “Short meeting title”,
-“details”: “Agenda and context as plain text”,
-“start_datetime”: “YYYY-MM-DDTHH:mm:00 or null”,
-“end_datetime”: “YYYY-MM-DDTHH:mm:00 or null”
-},
-{
-“type”: “task”,
-“title”: “Clear action item”,
-“notes”: “Any relevant context or empty string”,
-“due_date”: “YYYY-MM-DD or null”
-}
-]
-}`;
 
 async function processWithClaude(transcript) {
-const message = await anthropic.messages.create({
-model: “claude-sonnet-4-20250514”,
-max_tokens: 1024,
-system: STYLE_PROMPT,
-messages: [{ role: “user”, content: transcript }],
-});
-const text = message.content[0].text;
-const clean = text.replace(/`json|`/g, “”).trim();
-return JSON.parse(clean);
+  const today = new Date().toISOString().slice(0, 10);
+  const system = "You are Dexter's personal voice-to-Outlook assistant. Dexter Smith is a Product Director at IceMobile, working with clients like Kruidvat (AS Watson) and Albert Heijn.\n\nToday's date is " + today + ".\n\nTASK: Analyze the Dutch transcript, detect the intent(s), and produce structured JSON output.\n\nINTENT DETECTION:\n- email: Dexter wants to send an email\n- meeting: Dexter wants to schedule a meeting or calendar event\n- task: Dexter wants to add a to-do item\n\nSTRICT RULES:\n- Never auto-send, never invite attendees. Emails go to Drafts only.\n- Only email who Dexter explicitly mentions. Never assume recipients.\n- Default language is ALWAYS Dutch. Only switch to English if Dexter explicitly says so.\n- No em-dashes. Ever.\n\nDUTCH EMAIL STYLE:\n- Opening: always \"Hi [name],\" or \"Hi,\" - never \"Beste\" or \"Geachte\"\n- Sign-off: \"Groetjes,\\nDexter\"\n- Tone: direct, friendly, no padding. Point in first sentence.\n- Short declarative sentences. Bullet points for multiple items.\n\nENGLISH EMAIL STYLE (only when Dexter explicitly requests):\n- Opening: \"Hi [name]\" or \"Hi all\"\n- Sign-off: \"Regards,\\nDexter\"\n- Confident, clear, action-oriented.\n\nDATE/TIME PARSING:\n- Today is " + today + "\n- Parse relative dates: \"morgen\" = tomorrow, \"vrijdag\" = next Friday, \"volgende week dinsdag\" = next Tuesday\n- For meetings: extract start datetime and calculate end (default 1 hour unless specified)\n- Format datetimes as: YYYY-MM-DDTHH:mm:00 (24h, no timezone suffix)\n- For tasks: extract due date as YYYY-MM-DD\n- If no date/time mentioned, use null\n\nRespond ONLY with valid JSON, no markdown, no backticks:\n{\n  \"outputs\": [\n    {\n      \"type\": \"email\",\n      \"to_name\": \"Full name as spoken, or empty string\",\n      \"subject\": \"Short email subject\",\n      \"body\": \"Full email body text\"\n    },\n    {\n      \"type\": \"meeting\",\n      \"title\": \"Short meeting title\",\n      \"details\": \"Agenda and context as plain text\",\n      \"start_datetime\": \"YYYY-MM-DDTHH:mm:00 or null\",\n      \"end_datetime\": \"YYYY-MM-DDTHH:mm:00 or null\"\n    },\n    {\n      \"type\": \"task\",\n      \"title\": \"Clear action item\",\n      \"notes\": \"Any relevant context or empty string\",\n      \"due_date\": \"YYYY-MM-DD or null\"\n    }\n  ]\n}";
+
+  const message = await anthropic.messages.create({
+    model: "claude-sonnet-4-20250514",
+    max_tokens: 1024,
+    system: system,
+    messages: [{ role: "user", content: transcript }],
+  });
+  const text = message.content[0].text;
+  const clean = text.replace(/```json|```/g, "").trim();
+  return JSON.parse(clean);
 }
 
 async function sendTelegramMessage(chatId, text) {
-await fetch(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`, {
-method: “POST”,
-headers: { “Content-Type”: “application/json” },
-body: JSON.stringify({ chat_id: chatId, text }),
-});
+  await fetch("https://api.telegram.org/bot" + TELEGRAM_TOKEN + "/sendMessage", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ chat_id: chatId, text: text }),
+  });
 }
 
 async function handleUpdate(update) {
-const message = update.message;
-if (!message || !message.text) return;
+  const message = update.message;
+  if (!message || !message.text) return;
 
-const chatId = message.chat.id;
-const userId = message.from.id;
-const text = message.text.trim();
+  const chatId = message.chat.id;
+  const userId = message.from.id;
+  const text = message.text.trim();
 
-if (userId !== ALLOWED_USER_ID) return;
+  if (userId !== ALLOWED_USER_ID) return;
 
-// Handle disambiguation reply
-if (pendingLookups[chatId]) {
-const pending = pendingLookups[chatId];
-const choice = parseInt(text);
-if (!isNaN(choice) && choice >= 1 && choice <= pending.candidates.length) {
-const chosen = pending.candidates[choice - 1];
-const email = chosen.scoredEmailAddresses[0].address;
-delete pendingLookups[chatId];
-await sendTelegramMessage(chatId, “Even verwerken…”);
-try {
-await createDraft(pending.subject, pending.body, chosen.displayName, email);
-await sendTelegramMessage(chatId, `Email opgeslagen in Drafts\nAan: ${chosen.displayName} (${email})\nOnderwerp: ${pending.subject}`);
-} catch (err) {
-await sendTelegramMessage(chatId, `Er ging iets mis: ${err.message}`);
-}
-} else {
-await sendTelegramMessage(chatId, `Stuur een getal tussen 1 en ${pending.candidates.length}.`);
-}
-return;
-}
-
-if (text === “/start”) {
-await sendTelegramMessage(chatId, “Stuur je transcript en ik verwerk het direct in Outlook.”);
-return;
-}
-
-await sendTelegramMessage(chatId, “Even verwerken…”);
-
-try {
-const parsed = await processWithClaude(text);
-const results = [];
-
-```
-for (const output of parsed.outputs) {
-  if (output.type === "email") {
-    let toEmail = null;
-    let toDisplayName = output.to_name;
-
-    if (output.to_name) {
-      const candidates = await lookupRecipient(output.to_name);
-
-      if (candidates && candidates.length === 1) {
-        // Single match — use it directly, no question asked
-        toEmail = candidates[0].scoredEmailAddresses[0].address;
-        toDisplayName = candidates[0].displayName;
-      } else if (candidates && candidates.length > 1) {
-        // Multiple strong matches — ask Dexter
-        pendingLookups[chatId] = {
-          candidates,
-          subject: output.subject,
-          body: output.body,
-        };
-        const options = candidates
-          .map((p, i) => `${i + 1}. ${p.displayName} (${p.scoredEmailAddresses[0].address})`)
-          .join("\n");
-        await sendTelegramMessage(chatId, `Welke ${output.to_name} bedoel je?\n\n${options}`);
-        continue;
+  if (pendingLookups[chatId]) {
+    const pending = pendingLookups[chatId];
+    const choice = parseInt(text);
+    if (!isNaN(choice) && choice >= 1 && choice <= pending.candidates.length) {
+      const chosen = pending.candidates[choice - 1];
+      const email = chosen.scoredEmailAddresses[0].address;
+      delete pendingLookups[chatId];
+      await sendTelegramMessage(chatId, "Even verwerken...");
+      try {
+        await createDraft(pending.subject, pending.body, chosen.displayName, email);
+        await sendTelegramMessage(chatId, "Email opgeslagen in Drafts\nAan: " + chosen.displayName + " (" + email + ")\nOnderwerp: " + pending.subject);
+      } catch (err) {
+        await sendTelegramMessage(chatId, "Er ging iets mis: " + err.message);
       }
-      // Zero matches — create draft without email address
+    } else {
+      await sendTelegramMessage(chatId, "Stuur een getal tussen 1 en " + pending.candidates.length + ".");
+    }
+    return;
+  }
+
+  if (text === "/start") {
+    await sendTelegramMessage(chatId, "Stuur je transcript en ik verwerk het direct in Outlook.");
+    return;
+  }
+
+  await sendTelegramMessage(chatId, "Even verwerken...");
+
+  try {
+    const parsed = await processWithClaude(text);
+    const results = [];
+
+    for (const output of parsed.outputs) {
+      if (output.type === "email") {
+        let toEmail = null;
+        let toDisplayName = output.to_name;
+
+        if (output.to_name) {
+          const candidates = await lookupRecipient(output.to_name);
+          if (candidates && candidates.length === 1) {
+            toEmail = candidates[0].scoredEmailAddresses[0].address;
+            toDisplayName = candidates[0].displayName;
+          } else if (candidates && candidates.length > 1) {
+            pendingLookups[chatId] = {
+              candidates: candidates,
+              subject: output.subject,
+              body: output.body,
+            };
+            const options = candidates.map(function(p, i) {
+              return (i + 1) + ". " + p.displayName + " (" + p.scoredEmailAddresses[0].address + ")";
+            }).join("\n");
+            await sendTelegramMessage(chatId, "Welke " + output.to_name + " bedoel je?\n\n" + options);
+            continue;
+          }
+        }
+
+        await createDraft(output.subject, output.body, toDisplayName, toEmail);
+        const toLine = toEmail
+          ? "Aan: " + toDisplayName + " (" + toEmail + ")"
+          : "Aan: " + (toDisplayName || "onbekend") + " - vul e-mailadres in";
+        results.push("Email opgeslagen in Drafts\n" + toLine + "\nOnderwerp: " + output.subject);
+
+      } else if (output.type === "meeting") {
+        await createCalendarEvent(output.title, output.details, output.start_datetime, output.end_datetime);
+        const timeInfo = output.start_datetime
+          ? "\nTijd: " + output.start_datetime.replace("T", " om ").slice(0, 16)
+          : "\nTijd: nog in te vullen";
+        results.push("Meeting toegevoegd aan je agenda\nTitel: " + output.title + timeInfo);
+
+      } else if (output.type === "task") {
+        await createTask(output.title, output.notes, output.due_date);
+        const dueInfo = output.due_date ? "\nDeadline: " + output.due_date : "";
+        results.push("Taak aangemaakt in To Do\nTaak: " + output.title + dueInfo);
+      }
     }
 
-    await createDraft(output.subject, output.body, toDisplayName, toEmail);
-    const toLine = toEmail
-      ? `Aan: ${toDisplayName} (${toEmail})`
-      : `Aan: ${toDisplayName || "onbekend"} — vul e-mailadres in`;
-    results.push(`Email opgeslagen in Drafts\n${toLine}\nOnderwerp: ${output.subject}`);
+    if (results.length > 0) {
+      await sendTelegramMessage(chatId, results.join("\n\n---\n\n"));
+    }
 
-  } else if (output.type === "meeting") {
-    await createCalendarEvent(output.title, output.details, output.start_datetime, output.end_datetime);
-    const timeInfo = output.start_datetime
-      ? `\nTijd: ${output.start_datetime.replace("T", " om ").slice(0, 16)}`
-      : "\nTijd: nog in te vullen";
-    results.push(`Meeting toegevoegd aan je agenda\nTitel: ${output.title}${timeInfo}`);
-
-  } else if (output.type === "task") {
-    await createTask(output.title, output.notes, output.due_date);
-    const dueInfo = output.due_date ? `\nDeadline: ${output.due_date}` : "";
-    results.push(`Taak aangemaakt in To Do\nTaak: ${output.title}${dueInfo}`);
+  } catch (err) {
+    console.error("Error:", err);
+    await sendTelegramMessage(chatId, "Er ging iets mis: " + err.message);
   }
 }
 
-if (results.length > 0) {
-  await sendTelegramMessage(chatId, results.join("\n\n---\n\n"));
-}
-```
-
-} catch (err) {
-console.error(“Error:”, err);
-await sendTelegramMessage(chatId, `Er ging iets mis: ${err.message}`);
-}
-}
-
-const server = http.createServer(async (req, res) => {
-if (req.method === “POST”) {
-let body = “”;
-req.on(“data”, (chunk) => { body += chunk; });
-req.on(“end”, async () => {
-try {
-const update = JSON.parse(body);
-await handleUpdate(update);
-} catch (err) {
-console.error(“Webhook error:”, err);
-}
-res.writeHead(200);
-res.end(“OK”);
-});
-} else {
-res.writeHead(200);
-res.end(“Voice-to-Outlook bot is running.”);
-}
+const server = http.createServer(async function(req, res) {
+  if (req.method === "POST") {
+    let body = "";
+    req.on("data", function(chunk) { body += chunk; });
+    req.on("end", async function() {
+      try {
+        const update = JSON.parse(body);
+        await handleUpdate(update);
+      } catch (err) {
+        console.error("Webhook error:", err);
+      }
+      res.writeHead(200);
+      res.end("OK");
+    });
+  } else {
+    res.writeHead(200);
+    res.end("Voice-to-Outlook bot is running.");
+  }
 });
 
-server.listen(PORT, () => {
-console.log(`Bot running on port ${PORT}`);
+server.listen(PORT, function() {
+  console.log("Bot running on port " + PORT);
 });
