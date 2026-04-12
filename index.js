@@ -273,7 +273,79 @@ async function handleUpdate(update) {
 }
 
 const server = http.createServer(async function(req, res) {
+  // CORS headers so the app can talk to Railway
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "POST, GET, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+
+  if (req.method === "OPTIONS") {
+    res.writeHead(204);
+    res.end();
+    return;
+  }
+
+  if (req.method === "POST" && req.url === "/chat") {
+    // DXTR app endpoint
+    let body = "";
+    req.on("data", function(chunk) { body += chunk; });
+    req.on("end", async function() {
+      try {
+        const { message } = JSON.parse(body);
+        if (!message) {
+          res.writeHead(400);
+          res.end(JSON.stringify({ error: "Missing message" }));
+          return;
+        }
+        const parsed = await processWithClaude(message);
+        const results = [];
+        for (const output of parsed.outputs) {
+          if (output.type === "email") {
+            let toEmail = null;
+            let toDisplayName = output.to_name;
+            if (output.to_name) {
+              const candidates = await lookupRecipient(output.to_name);
+              if (candidates && candidates.length >= 1) {
+                toEmail = candidates[0].scoredEmailAddresses[0].address;
+                toDisplayName = candidates[0].displayName;
+              }
+            }
+            await createDraft(output.subject, output.body, toDisplayName, toEmail);
+            results.push({
+              type: "email",
+              to: toDisplayName || output.to_name,
+              subject: output.subject
+            });
+          } else if (output.type === "meeting") {
+            await createCalendarEvent(output.title, output.details, output.start_datetime, output.end_datetime);
+            results.push({
+              type: "meeting",
+              title: output.title,
+              datetime: output.start_datetime
+                ? output.start_datetime.replace("T", " om ").slice(0, 16)
+                : null
+            });
+          } else if (output.type === "task") {
+            await createTask(output.title, output.notes, output.due_date);
+            results.push({
+              type: "task",
+              title: output.title,
+              deadline: output.due_date || null
+            });
+          }
+        }
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ outputs: results }));
+      } catch (err) {
+        console.error("Chat endpoint error:", err);
+        res.writeHead(500);
+        res.end(JSON.stringify({ error: err.message }));
+      }
+    });
+    return;
+  }
+
   if (req.method === "POST") {
+    // Telegram webhook — unchanged
     let body = "";
     req.on("data", function(chunk) { body += chunk; });
     req.on("end", async function() {
@@ -286,10 +358,15 @@ const server = http.createServer(async function(req, res) {
       res.writeHead(200);
       res.end("OK");
     });
-  } else {
-    res.writeHead(200);
-    res.end("Voice-to-Outlook bot is running.");
+    return;
   }
+
+  res.writeHead(200);
+  res.end("Voice-to-Outlook bot is running.");
+});
+
+server.listen(PORT, function() {
+  console.log("Bot running on port " + PORT);
 });
 
 server.listen(PORT, function() {
