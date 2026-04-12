@@ -368,7 +368,3 @@ const server = http.createServer(async function(req, res) {
 server.listen(PORT, function() {
   console.log("Bot running on port " + PORT);
 });
-
-server.listen(PORT, function() {
-  console.log("Bot running on port " + PORT);
-});
